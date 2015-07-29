@@ -203,7 +203,7 @@ void Emitter::DoCheckCache(const Atomic<bool>& is_shutting_down) {
     base::proto::Local* incoming = std::get<MESSAGE>(*task).get();
     cache::FileCache::Entry entry;
 
-    auto RestoreFromCache = [&](const HandledSource& source) {
+    auto RestoreFromCache = [&](const HandledSource& source, Immutable deps) {
       String error;
       const String output_path = GetOutputPath(incoming);
 
@@ -217,10 +217,8 @@ void Emitter::DoCheckCache(const Atomic<bool>& is_shutting_down) {
                    << error;
       }
 
-      // TODO: restore deps file.
-
-      if (!source.str.empty()) {
-        UpdateDirectCache(incoming, source, entry);
+      if (!source.str.empty() && !deps.empty()) {
+        UpdateDirectCache(incoming, source, deps, entry);
       }
 
       net::proto::Status status;
@@ -232,7 +230,7 @@ void Emitter::DoCheckCache(const Atomic<bool>& is_shutting_down) {
     };
 
     if (SearchDirectCache(incoming->flags(), incoming->current_dir(), &entry) &&
-        RestoreFromCache(HandledSource())) {
+        RestoreFromCache(HandledSource(), Literal::empty)) {
       STAT(DIRECT_CACHE_HIT);
       continue;
     }
@@ -252,8 +250,11 @@ void Emitter::DoCheckCache(const Atomic<bool>& is_shutting_down) {
       continue;
     }
 
+    Immutable deps;
+    // TODO: read from the generated deps file into |deps|.
+
     if (SearchSimpleCache(incoming->flags(), source, &entry) &&
-        RestoreFromCache(source)) {
+        RestoreFromCache(source, deps)) {
       STAT(SIMPLE_CACHE_HIT);
       continue;
     }
@@ -311,12 +312,13 @@ void Emitter::DoLocalExecute(const Atomic<bool>& is_shutting_down) {
 
       if (!source.str.empty()) {
         cache::FileCache::Entry entry;
+        Immutable deps;
         if (base::File::Read(GetOutputPath(incoming), &entry.object) &&
             (!incoming->flags().has_deps_file() ||
-             base::File::Read(GetDepsPath(incoming), &entry.deps))) {
+             base::File::Read(GetDepsPath(incoming), &deps))) {
           entry.stderr = process->stderr();
           UpdateSimpleCache(incoming->flags(), source, entry);
-          UpdateDirectCache(incoming, source, entry);
+          UpdateDirectCache(incoming, source, deps, entry);
         }
       }
 
@@ -445,15 +447,13 @@ void Emitter::DoRemoteExecute(const Atomic<bool>& is_shutting_down,
                   << incoming->flags().input();
 
         cache::FileCache::Entry entry;
+        Immutable deps;
         auto GenerateEntry = [&] {
           String error;
 
           entry.object = result->release_obj();
-          if (result->has_deps()) {
-            entry.deps = result->release_deps();
-          } else if (incoming->flags().has_deps_file() &&
-                     !base::File::Read(GetDepsPath(incoming), &entry.deps,
-                                       &error)) {
+          if (incoming->flags().has_deps_file() &&
+              !base::File::Read(GetDepsPath(incoming), &deps, &error)) {
             LOG(CACHE_WARNING) << "Can't read deps file "
                                << GetDepsPath(incoming) << " : " << error;
             return false;
@@ -465,7 +465,7 @@ void Emitter::DoRemoteExecute(const Atomic<bool>& is_shutting_down,
 
         if (GenerateEntry()) {
           UpdateSimpleCache(incoming->flags(), source, entry);
-          UpdateDirectCache(incoming, source, entry);
+          UpdateDirectCache(incoming, source, deps, entry);
         }
 
         std::get<CONNECTION>(*task)->ReportStatus(status);
